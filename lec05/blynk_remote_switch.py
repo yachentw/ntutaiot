@@ -41,7 +41,20 @@ if __name__ == '__main__':
         print("Replace the token.")
         GPIO.cleanup()
         sys.exit()
-    while True:
-        cmd = get_virtual_pin_value()
-        led(int(cmd))
-        time.sleep(1)
+    try:
+        while True:
+            cmd = get_virtual_pin_value()
+            # 2026-05-05 修正：get_virtual_pin_value() 可能回傳 None 或非數字字串，
+            # 加入例外處理避免 int() 轉換失敗導致程式崩潰
+            if cmd is None:
+                time.sleep(1)
+                continue
+            try:
+                led(int(cmd))
+            except ValueError:
+                print(f"Invalid command value: {cmd}")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Exception: KeyboardInterrupt")
+    finally:
+        GPIO.cleanup()  # 2026-05-05 修正：加入 finally 確保 GPIO 資源釋放

@@ -68,7 +68,6 @@ def writeMPU6050(reg, val):
     bus.write_byte_data(MPU6050_ADDRESS, reg, val)
 
 def writeRegBytes(reg, vals):
-    print(vals)
     bus.write_i2c_block_data(MPU6050_ADDRESS, reg, vals)
 
 def readMPU6050(reg, byteNum):
@@ -121,15 +120,12 @@ def configModule():
     time.sleep(0.05)
     writeMPU6050(RA_ACCEL_CONFIG, accelSensitivity.value << 3) # Accel full scale setting
     time.sleep(0.05)
+    # 先重置訊號路徑，讓感測器穩定後再校正
+    writeMPU6050(RA_SIGNAL_PATH_RESET, 0x07) # reset gyro and accel sensor
+    time.sleep(0.1)  # 等待感測器穩定
 
     cali_offset['gx'], cali_offset['gy'], cali_offset['gz'] = calibrate_gyro()
-
-    # writeMPU6050(RA_INT_PIN_CFG, 0x10) # 1<<4 interrupt status bits are cleared on any read operation
-    # time.sleep(0.05)
-    # writeMPU6050(RA_INT_ENABLE, 0x01) # interupt occurs when data is ready.
-    # time.sleep(0.05)
-    writeMPU6050(RA_SIGNAL_PATH_RESET, 0x07) # reset gyro and accel sensor
-    time.sleep(0.05)
+    cali_offset['ax'], cali_offset['ay'], cali_offset['az'] = calibrate_accel()
 
 
 
@@ -150,13 +146,13 @@ def getAccelGyro():
     # data0 = bus.read_byte_data(MPU6050_ADDRESS, ACCEL_XOUT_H)
     # data1 = bus.read_byte_data(MPU6050_ADDRESS, ACCEL_XOUT_H + 1)
     xAccl = struct.unpack('>h', bytes([data[0], data[1]]))[0]  # Big-endian (MSB first)
-    accel['x'] = xAccl / 16384.0  # scale factor is 16384
+    accel['x'] = (xAccl - cali_offset['ax']) / 16384.0
     # Y-Axis
     yAccl = struct.unpack('>h', bytes([data[2], data[3]]))[0]
-    accel['y'] = yAccl / 16384.0
+    accel['y'] = (yAccl - cali_offset['ay']) / 16384.0
     # Z-Axis
     zAccl = struct.unpack('>h', bytes([data[4], data[5]]))[0]
-    accel['z'] = zAccl / 16384.0
+    accel['z'] = (zAccl - cali_offset['az']) / 16384.0
 
     # gyro X-Axis
     xGyro = struct.unpack('>h', bytes([data[8], data[9]]))[0]  # Big-endian (MSB first)

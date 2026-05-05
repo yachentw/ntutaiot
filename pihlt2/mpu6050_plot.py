@@ -63,15 +63,19 @@ def update(frame):
     gyro_y_data.append(gyro_y)
     gyro_z_data.append(gyro_z)
 
-    # Keep only the last data within display_range
+    # 依時間戳過濾，只保留最近 display_range 秒的資料
     if current_time > display_range:
-        time_data = time_data[-int(display_range * 10):]
-        accel_x_data = accel_x_data[-len(time_data):]
-        accel_y_data = accel_y_data[-len(time_data):]
-        accel_z_data = accel_z_data[-len(time_data):]
-        gyro_x_data = gyro_x_data[-len(time_data):]
-        gyro_y_data = gyro_y_data[-len(time_data):]
-        gyro_z_data = gyro_z_data[-len(time_data):]
+        cutoff = current_time - display_range
+        keep = [i for i, t in enumerate(time_data) if t >= cutoff]
+        if keep:
+            start = keep[0]
+            time_data = time_data[start:]
+            accel_x_data = accel_x_data[start:]
+            accel_y_data = accel_y_data[start:]
+            accel_z_data = accel_z_data[start:]
+            gyro_x_data = gyro_x_data[start:]
+            gyro_y_data = gyro_y_data[start:]
+            gyro_z_data = gyro_z_data[start:]
 
     # Update accelerometer plot
     line_accel_x.set_data(time_data, accel_x_data)
@@ -94,6 +98,7 @@ import sys
 
 def signal_handler(sig, frame):
     print("\nKeyboardInterrupt: Exiting program.")
+    plt.close('all')
     sys.exit(0)
 
 def on_key(event):

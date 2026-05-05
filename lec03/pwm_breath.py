@@ -18,5 +18,4 @@ except KeyboardInterrupt:
     print("\nKeyboardInterrupt")
 finally:
     pwm.stop()
-    # for rpi-lgpio
-    # GPIO.cleanup()
+    GPIO.cleanup()  # 2026-05-05 修正：釋放 GPIO 資源，避免下次執行時出現佔用警告

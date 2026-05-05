@@ -12,6 +12,7 @@ try:
         if input == GPIO.LOW and previousStatus == GPIO.HIGH:
             print("Button pressed @", time.ctime())
         previousStatus = input
+        time.sleep(0.01)  # 2026-05-05 修正：輪詢加入延遲，避免 CPU 100% 空轉
 except KeyboardInterrupt:
     print("Exception: KeyboardInterrupt")
 

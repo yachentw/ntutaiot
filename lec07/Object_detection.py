@@ -122,110 +122,97 @@ font = cv2.FONT_HERSHEY_SIMPLEX
 # detection loop twice, and made one work for Picamera and the other work
 # for USB.
 
+# 2026-05-05 修正：以 try-finally 包覆相機與 TF Session，確保資源在任何情況下都能釋放
 ### Picamera ###
 if camera_type == 'picamera':
-    # Initialize Picamera and grab reference to the raw capture
     camera = PiCamera()
     camera.resolution = (IM_WIDTH,IM_HEIGHT)
     camera.framerate = 10
     rawCapture = PiRGBArray(camera, size=(IM_WIDTH,IM_HEIGHT))
     rawCapture.truncate(0)
 
-    for frame1 in camera.capture_continuous(rawCapture, format="bgr",use_video_port=True):
+    try:
+        for frame1 in camera.capture_continuous(rawCapture, format="bgr",use_video_port=True):
 
-        t1 = cv2.getTickCount()
-        
-        # Acquire frame and expand frame dimensions to have shape: [1, None, None, 3]
-        # i.e. a single-column array, where each item in the column has the pixel RGB value
-        frame = np.copy(frame1.array)
-        frame.setflags(write=1)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_expanded = np.expand_dims(frame_rgb, axis=0)
+            t1 = cv2.getTickCount()
 
-        # Perform the actual detection by running the model with the image as input
-        (boxes, scores, classes, num) = sess.run(
-            [detection_boxes, detection_scores, detection_classes, num_detections],
-            feed_dict={image_tensor: frame_expanded})
+            frame = np.copy(frame1.array)
+            frame.setflags(write=1)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_expanded = np.expand_dims(frame_rgb, axis=0)
 
-        # Draw the results of the detection (aka 'visulaize the results')
-        vis_util.visualize_boxes_and_labels_on_image_array(
-            frame,
-            np.squeeze(boxes),
-            np.squeeze(classes).astype(np.int32),
-            np.squeeze(scores),
-            category_index,
-            use_normalized_coordinates=True,
-            line_thickness=8,
-            min_score_thresh=0.40)
+            (boxes, scores, classes, num) = sess.run(
+                [detection_boxes, detection_scores, detection_classes, num_detections],
+                feed_dict={image_tensor: frame_expanded})
 
-        cv2.putText(frame,"FPS: {0:.2f}".format(frame_rate_calc),(30,50),font,1,(255,255,0),2,cv2.LINE_AA)
+            vis_util.visualize_boxes_and_labels_on_image_array(
+                frame,
+                np.squeeze(boxes),
+                np.squeeze(classes).astype(np.int32),
+                np.squeeze(scores),
+                category_index,
+                use_normalized_coordinates=True,
+                line_thickness=8,
+                min_score_thresh=0.40)
 
-        # All the results have been drawn on the frame, so it's time to display it.
-        cv2.imshow('Object detector', frame)
+            cv2.putText(frame,"FPS: {0:.2f}".format(frame_rate_calc),(30,50),font,1,(255,255,0),2,cv2.LINE_AA)
+            cv2.imshow('Object detector', frame)
 
-        t2 = cv2.getTickCount()
-        time1 = (t2-t1)/freq
-        frame_rate_calc = 1/time1
+            t2 = cv2.getTickCount()
+            time1 = (t2-t1)/freq
+            frame_rate_calc = 1/time1
 
-        # Press 'q' to quit
-        if cv2.waitKey(1) == ord('q'):
-            break
+            if cv2.waitKey(1) == ord('q'):
+                break
 
-        rawCapture.truncate(0)
-
-    camera.close()
+            rawCapture.truncate(0)
+    finally:
+        camera.close()  # 2026-05-05 修正：確保例外時 PiCamera 也會關閉
 
 ### USB webcam ###
 elif camera_type == 'usb':
-    # Initialize USB webcam feed
     camera = cv2.VideoCapture(0, cv2.CAP_V4L)
     ret = camera.set(3,IM_WIDTH)
     ret = camera.set(4,IM_HEIGHT)
 
-    while(True):
+    try:
+        while(True):
 
-        t1 = cv2.getTickCount()
+            t1 = cv2.getTickCount()
 
-        # Acquire frame and expand frame dimensions to have shape: [1, None, None, 3]
-        # i.e. a single-column array, where each item in the column has the pixel RGB value
-        ret, frame = camera.read()
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_expanded = np.expand_dims(frame_rgb, axis=0)
+            ret, frame = camera.read()
+            if not ret:  # 2026-05-05 修正：加入 ret 檢查，避免讀取失敗時對 None 操作崩潰
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_expanded = np.expand_dims(frame_rgb, axis=0)
 
-        # Perform the actual detection by running the model with the image as input
-        (boxes, scores, classes, num) = sess.run(
-            [detection_boxes, detection_scores, detection_classes, num_detections],
-            feed_dict={image_tensor: frame_expanded})        
+            (boxes, scores, classes, num) = sess.run(
+                [detection_boxes, detection_scores, detection_classes, num_detections],
+                feed_dict={image_tensor: frame_expanded})
 
-        # Draw the results of the detection (aka 'visulaize the results')
-        vis_util.visualize_boxes_and_labels_on_image_array(
-            frame,
-            np.squeeze(boxes),
-            np.squeeze(classes).astype(np.int32),
-            np.squeeze(scores),
-            category_index,
-            use_normalized_coordinates=True,
-            line_thickness=8,
-            min_score_thresh=0.3)
-        # print(np.squeeze(boxes)[:5])
-        # print(np.squeeze(classes))
-        # print(np.squeeze(scores))
-        # print(category_index)
+            vis_util.visualize_boxes_and_labels_on_image_array(
+                frame,
+                np.squeeze(boxes),
+                np.squeeze(classes).astype(np.int32),
+                np.squeeze(scores),
+                category_index,
+                use_normalized_coordinates=True,
+                line_thickness=8,
+                min_score_thresh=0.3)
 
-        cv2.putText(frame,"FPS: {0:.2f}".format(frame_rate_calc),(30,50),font,1,(255,255,0),2,cv2.LINE_AA)
-        
-        # All the results have been drawn on the frame, so it's time to display it.
-        cv2.imshow('Object detector', frame)
+            cv2.putText(frame,"FPS: {0:.2f}".format(frame_rate_calc),(30,50),font,1,(255,255,0),2,cv2.LINE_AA)
+            cv2.imshow('Object detector', frame)
 
-        t2 = cv2.getTickCount()
-        time1 = (t2-t1)/freq
-        frame_rate_calc = 1/time1
+            t2 = cv2.getTickCount()
+            time1 = (t2-t1)/freq
+            frame_rate_calc = 1/time1
 
-        # Press 'q' to quit
-        if cv2.waitKey(1) == ord('q'):
-            break
+            if cv2.waitKey(1) == ord('q'):
+                break
+    finally:
+        camera.release()  # 2026-05-05 修正：確保例外時 USB 相機也會釋放
 
-    camera.release()
-
+# 2026-05-05 修正：關閉 TensorFlow Session，釋放 GPU/CPU 記憶體資源
+sess.close()
 cv2.destroyAllWindows()
 

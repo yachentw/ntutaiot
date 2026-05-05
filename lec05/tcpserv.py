@@ -38,4 +38,5 @@ try:
 except KeyboardInterrupt:
     print("Exception: KeyboardInterrupt")
 finally:
+    socks.close()   # 2026-05-05 修正：關閉監聽 socket，釋放 PORT 佔用
     GPIO.cleanup()

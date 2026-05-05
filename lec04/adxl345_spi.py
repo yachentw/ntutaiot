@@ -77,4 +77,5 @@ try:
         time.sleep(0.1)
 except KeyboardInterrupt:
     print("Ctrl+C Break")
-    spi.close()
+finally:
+    spi.close()  # 2026-05-05 修正：移至 finally 確保正常結束與例外時都會關閉 SPI 裝置

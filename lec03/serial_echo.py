@@ -13,7 +13,7 @@ try:
         data = ser.readline()
         print(data.decode("utf-8").strip())
         ser.write(data)
-        ser.flushInput()
+        ser.reset_input_buffer()  # 2026-05-05 修正：flushInput() 已棄用，改用 reset_input_buffer()
         time.sleep(0.1)
 except KeyboardInterrupt:
     pass
