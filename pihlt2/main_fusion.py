@@ -5,7 +5,7 @@ Decision-level Fusion。兩個模型各自在獨立執行緒推論，
 只有兩者都同意同一動作時才更新狀態機，降低誤判率。
 """
 
-import io
+import os
 import sys
 import cv2
 import threading
@@ -17,13 +17,16 @@ import matplotlib.pyplot as plt
 from queue import Queue, Empty
 from tflite_runtime.interpreter import Interpreter
 import mpu6050_raw
-from PIL import Image
+# 2026-05-05 加速：改用 fig.canvas.buffer_rgba() 直接取像素，移除 io / PIL 依賴
+
+# 2026-05-05 修正：使用腳本所在目錄作為基準，避免相對路徑受執行目錄影響
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── 模型路徑設定 ──────────────────────────────────────────────────────────────
-CAMERA_MODEL_PATH  = "camera_model.tflite"
-CAMERA_LABELS_PATH = "camera_labels.txt"
-ACCEL_MODEL_PATH   = "accel_model.tflite"
-ACCEL_LABELS_PATH  = "accel_labels.txt"
+CAMERA_MODEL_PATH  = os.path.join(SCRIPT_DIR, "camera_model.tflite")
+CAMERA_LABELS_PATH = os.path.join(SCRIPT_DIR, "camera_labels.txt")
+ACCEL_MODEL_PATH   = os.path.join(SCRIPT_DIR, "accel_model.tflite")
+ACCEL_LABELS_PATH  = os.path.join(SCRIPT_DIR, "accel_labels.txt")
 
 # ── 動作序列與狀態機參數 ──────────────────────────────────────────────────────
 ACTION_STATE         = ["Relax", "Curl", "Relax"]
@@ -68,27 +71,33 @@ class SharedPrediction:
 
 
 # ── 影像前處理 ────────────────────────────────────────────────────────────────
-def preprocess_camera(frame, resize=(224, 224)):
-    """BGR 影像 → 模型輸入 (1,224,224,3)：中心裁切 → BGR→RGB → 正規化"""
+def preprocess_camera(frame, out, resize=(224, 224)):
+    """BGR 影像 → 模型輸入 (1,224,224,3)：中心裁切 → BGR→RGB → 正規化
+
+    2026-05-05 加速：接收外部預先分配的 out buffer，避免每幀重新配置記憶體。
+    """
     h, w, _ = frame.shape
     crop = min(h, w)
     y0, x0 = (h - crop) // 2, (w - crop) // 2
     cropped = frame[y0:y0+crop, x0:x0+crop]
     rgb     = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
     resized = cv2.resize(rgb, resize, interpolation=cv2.INTER_LINEAR)
-    norm    = (resized.astype(np.float32) / 127.5) - 1.0
-    return norm[np.newaxis]   # (1, 224, 224, 3)
+    out[0]  = (resized.astype(np.float32) / 127.5) - 1.0
+    return out
 
 
-def preprocess_accel(fig):
-    """matplotlib 圖表 → 模型輸入 (1,224,224,3)：PIL 已是 RGB，取前三通道後正規化"""
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png')
-    buf.seek(0)
-    frame = np.array(Image.open(buf))
-    buf.close()
-    norm = (frame[:, :, :3].astype(np.float32) / 127.5) - 1.0
-    return norm[np.newaxis]   # (1, 224, 224, 3)
+def preprocess_accel(fig, out):
+    """matplotlib 圖表 → 模型輸入 (1,224,224,3)
+
+    2026-05-05 加速：直接從 canvas buffer 取像素，跳過 PNG 編解碼；
+    使用 np.asarray 相容 matplotlib 各版本（memoryview / ndarray 皆可）；
+    使用外部預先分配的 out buffer，避免每個 window 重新配置記憶體。
+    """
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    frame = np.asarray(fig.canvas.buffer_rgba()).reshape(h, w, 4)
+    out[0] = (frame[:, :, :3].astype(np.float32) / 127.5) - 1.0
+    return out
 
 
 # ── 融合決策函式 ──────────────────────────────────────────────────────────────
@@ -116,6 +125,9 @@ def camera_worker(shared: SharedPrediction, labels: list,
     input_details  = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
 
+    # 2026-05-05 加速：預先分配 input buffer，避免每幀重新配置記憶體
+    input_buffer = np.empty((1, 224, 224, 3), dtype=np.float32)
+
     cap = cv2.VideoCapture(0)
     try:
         while not stop_event.is_set():
@@ -125,7 +137,7 @@ def camera_worker(shared: SharedPrediction, labels: list,
             frame = cv2.flip(frame, 1)
 
             interpreter.set_tensor(input_details[0]['index'],
-                                   preprocess_camera(frame))
+                                   preprocess_camera(frame, out=input_buffer))
             interpreter.invoke()
             pred = interpreter.get_tensor(output_details[0]['index'])[0]
 
@@ -183,6 +195,9 @@ def accel_worker(shared: SharedPrediction, interpreter: Interpreter,
     ax.set_ylim(-1.25, 1.25)
     plt.tight_layout()
 
+    # 2026-05-05 加速：預先分配 input buffer，避免每個 window 重新配置記憶體
+    input_buffer = np.empty((1, 224, 224, 3), dtype=np.float32)
+
     buffer = []
     while not stop_event.is_set():
         try:
@@ -204,7 +219,7 @@ def accel_worker(shared: SharedPrediction, interpreter: Interpreter,
 
         # 推論
         interpreter.set_tensor(input_details[0]['index'],
-                                preprocess_accel(fig))
+                                preprocess_accel(fig, out=input_buffer))
         interpreter.invoke()
         pred = interpreter.get_tensor(output_details[0]['index'])[0]
 

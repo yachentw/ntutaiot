@@ -1,4 +1,4 @@
-import io
+import os
 import threading
 import time
 import numpy as np
@@ -8,7 +8,12 @@ import matplotlib.pyplot as plt
 from queue import Queue
 from tflite_runtime.interpreter import Interpreter
 import mpu6050_raw
-from PIL import Image
+# 2026-05-05 加速：改用 fig.canvas.buffer_rgba() 直接取像素，移除 io / PIL 依賴
+
+# 2026-05-05 修正：使用腳本所在目錄作為基準，避免相對路徑受執行目錄影響
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LABELS_PATH = os.path.join(SCRIPT_DIR, "accel_labels.txt")
+MODEL_PATH = os.path.join(SCRIPT_DIR, "accel_model.tflite")
 
 # 可調整參數
 sampling_interval = 0.01  # 感測器取樣間隔（秒），決定資料解析度
@@ -26,7 +31,7 @@ currentState = 0          # 目前所在的動作狀態索引
 Curl_Count = 0            # 已完成的動作次數
 transCount = 0            # 連續偵測到下一個狀態的次數（防抖用）
 missCount = 0             # 連續偵測錯誤的次數（錯誤恢復用）
-with open("accel_labels.txt", 'r') as f:
+with open(LABELS_PATH, 'r') as f:
     labels = [line.strip().split()[-1] for line in f]   # 從檔案載入類別名稱
 # actionState = ["Relax", "Move", "Curl", "Move", "Relax"]  # 完整動作序列（保留備用）
 actionState = ["Relax", "Curl", "Relax"]             # 簡化動作序列：放鬆 → 動作 → 放鬆
@@ -52,8 +57,12 @@ def initialize_plot():
     return fig, ax, accel_lines
 
 
-def update_plot(fig, accel_lines, data_points, bg=None):
-    """更新圖表內容，將最新一批感測器資料繪製到折線圖上"""
+def update_plot(fig, accel_lines, data_points):
+    """更新圖表資料
+
+    2026-05-05 修正：移除無效的 blit 邏輯。Agg backend 不支援 blit/flush_events，
+    實際渲染由主迴圈的 fig.canvas.draw() 負責，此函式只負責更新折線資料。
+    """
     timestamps = [point['time'] for point in data_points]
     accel_data = [
         [point['accel']['x'] for point in data_points],
@@ -64,56 +73,47 @@ def update_plot(fig, accel_lines, data_points, bg=None):
     for line, data in zip(accel_lines, accel_data):
         line.set_data(timestamps, data)
 
-    ax = fig.axes[0]
-    ax.set_xlim(timestamps[0], timestamps[-1])
-
-    # 若有背景快取則使用 blit 加速渲染，否則完整重繪
-    if bg:
-        fig.canvas.restore_region(bg)
-    for line in accel_lines:
-        ax.draw_artist(line)
-    fig.canvas.blit(ax.bbox)
-    fig.canvas.flush_events()
+    fig.axes[0].set_xlim(timestamps[0], timestamps[-1])
 
 
 def sensor_reader(queue, stop_event):
     """感測器讀取執行緒：持續從 MPU6050 取得加速度資料並放入佇列
 
-    使用 stop_event 控制暫停/繼續，避免在推論期間產生多餘資料。
+    2026-05-05 加速：移除推論期間暫停機制，感測器持續運行，
+    推論結束後清空佇列舊資料，確保下個 window 使用最新資料。
     """
     start_time = time.time()
-    while True:
-        if not stop_event.is_set():
-            try:
-                accel, _ = mpu6050_raw.getAccelGyro()  # 只取加速度，忽略陀螺儀
-                timestamp = time.time()
-                elapsed_time = timestamp - start_time
-                queue.put({'time': elapsed_time, 'accel': accel})
-                time.sleep(sampling_interval)
-            except Exception as e:
-                print(f"Error in sensor_reader: {e}")
-                break
+    # 2026-05-05 加速：改為 while not stop_event，stop_event 僅用於程式結束
+    while not stop_event.is_set():
+        try:
+            accel, _ = mpu6050_raw.getAccelGyro()  # 只取加速度，忽略陀螺儀
+            timestamp = time.time()
+            elapsed_time = timestamp - start_time
+            queue.put({'time': elapsed_time, 'accel': accel})
+            time.sleep(sampling_interval)
+        except Exception as e:
+            print(f"Error in sensor_reader: {e}")
+            break
 
 
-def preprocess(frame, resize=(224, 224), norm=True):
+def preprocess(frame, out, norm=True):
     """前處理函式：將圖表影像轉換為模型所需格式
 
-    輸入來源為 PIL 讀取的 PNG 圖表（RGBA），已是 RGB 順序，
-    不需要像 OpenCV 那樣做 BGR → RGB 轉換。
-    圖表尺寸由 initialize_plot 的 figsize 控制為 224×224，不需 resize。
+    輸入來源為 fig.canvas.buffer_rgba() 取得的 RGBA numpy 陣列，
+    已是 RGB 順序，不需 BGR→RGB 轉換，也不需 resize（figsize 已控制尺寸）。
 
+    2026-05-05 加速：接收外部預先分配的 out buffer，避免每次推論重新配置記憶體。
     正規化公式：(pixel / 127.5) - 1，將 [0, 255] 映射到 [-1, 1]
     """
-    # 取前三個通道（R, G, B），去除 PNG 的 alpha 透明通道
+    # 取前三個通道（R, G, B），去除 RGBA 的 alpha 通道
     frame_rgb = frame[:, :, :3]
 
-    # 正規化像素值到 [-1, 1]，符合 Teachable Machine 模型的輸入要求
-    frame_norm = ((frame_rgb.astype(np.float32) / 127.5) - 1) if norm else frame_rgb
-
-    # 調整為 batch 格式 (1, 224, 224, 3)
-    input_format = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
-    input_format[0] = frame_norm
-    return input_format
+    # 正規化並原地寫入預先分配的 buffer
+    if norm:
+        out[0] = (frame_rgb.astype(np.float32) / 127.5) - 1.0
+    else:
+        out[0] = frame_rgb.astype(np.float32)
+    return out
 
 
 if __name__ == "__main__":
@@ -122,7 +122,7 @@ if __name__ == "__main__":
     stop_event = threading.Event()
 
     # 載入 TensorFlow Lite 模型並配置輸入/輸出 tensor
-    interpreter = Interpreter(model_path="accel_model.tflite")
+    interpreter = Interpreter(model_path=MODEL_PATH)
     interpreter.allocate_tensors()
 
     input_details = interpreter.get_input_details()
@@ -135,7 +135,10 @@ if __name__ == "__main__":
         sensor_thread.start()
 
         fig, ax, accel_lines = initialize_plot()
-        plt.ion()  # 開啟互動模式
+        # 2026-05-05 修正：移除 plt.ion()，Agg backend 不支援互動模式
+
+        # 2026-05-05 加速：預先分配 input buffer，避免每次推論重新配置記憶體
+        input_buffer = np.empty((1, 224, 224, 3), dtype=np.float32)
 
         recorded_data = []
         while True:
@@ -144,21 +147,17 @@ if __name__ == "__main__":
                 recorded_data.append(data_queue.get())
 
             if len(recorded_data) >= samples_num:
-                # 暫停感測器執行緒，避免推論期間資料混入
-                stop_event.set()
-
                 # 將感測器資料繪製成圖表
                 update_plot(fig, accel_lines, recorded_data[:samples_num])
 
-                # 將圖表存入記憶體緩衝區，再用 PIL 轉為 numpy 陣列（避免寫入磁碟）
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png')
-                buf.seek(0)
-                frame = np.array(Image.open(buf))
-                buf.close()
+                # 2026-05-05 加速：直接從 canvas buffer 取像素，跳過 PNG 編解碼
+                # 使用 np.asarray 相容 matplotlib 各版本（memoryview / ndarray 皆可）
+                fig.canvas.draw()
+                w, h = fig.canvas.get_width_height()
+                frame = np.asarray(fig.canvas.buffer_rgba()).reshape(h, w, 4)
 
-                # 前處理後送入模型推論
-                input_data = preprocess(frame)
+                # 前處理後送入模型推論（使用預先分配的 buffer）
+                input_data = preprocess(frame, out=input_buffer)
                 interpreter.set_tensor(input_details[0]['index'], input_data)
                 interpreter.invoke()
                 prediction = interpreter.get_tensor(output_details[0]['index'])[0]
@@ -197,15 +196,12 @@ if __name__ == "__main__":
                 print("currentState:", currentState)
                 print("curl count: ", Curl_Count)
 
-                # 清空資料，重新開始下一個 window
+                # 2026-05-05 加速：感測器持續運行，推論結束後清空佇列舊資料
                 recorded_data = []
                 with data_queue.mutex:
                     data_queue.queue.clear()
-                # 恢復感測器執行緒
-                stop_event.clear()
 
     except KeyboardInterrupt:
         print("\nExiting program.")
         stop_event.set()
-        plt.ioff()
-        plt.show()
+        # 2026-05-05 修正：移除 plt.ioff() 和 plt.show()，Agg backend 不會顯示視窗
